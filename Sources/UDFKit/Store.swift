@@ -32,14 +32,12 @@ public final class Store<Root: Reducer>: StoreCore, ObservableObject {
     
     let reducer: Root
     
-    private let dependency: Root.Dependency
-    
-    public init(state: Root.State, reducer: Root, dependency: Root.Dependency) {
+    public init(state: Root.State, reducer: Root) {
         self.state = state
         self.reducer = reducer
-        self.dependency = dependency
     }
     
+    @discardableResult
     public func send(_ action: Root.Action) -> Task<Void, Never>? {
         self.bufferedActions.append(action)
         guard !self.isSending else { return nil }
@@ -65,7 +63,7 @@ public final class Store<Root: Reducer>: StoreCore, ObservableObject {
         while index < self.bufferedActions.endIndex {
             defer { index += 1 }
             let action = self.bufferedActions[index]
-            let effect = reducer.reduce(&currentState, action: action, dependency: dependency)
+            let effect = reducer.reduce(&currentState, action: action)
             let uuid = UUID()
             
             switch effect.operation {

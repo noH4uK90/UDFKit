@@ -13,10 +13,10 @@ public protocol EmptyReducerDependency: ReducerDependency {}
 
 public protocol Reducer<State, Action> {
     associatedtype State
-    
     associatedtype Action
+    associatedtype Dependency
     
-    associatedtype Dependency: ReducerDependency = EmptyReducerDependency
+    var dependency: Dependency { get }
     
-    func reduce(_ state: inout State, action: Action, dependency: Dependency) -> Effect<Action>
+    func reduce(_ state: inout State, action: Action) -> Effect<Action>
 }
