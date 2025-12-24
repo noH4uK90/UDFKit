@@ -7,16 +7,20 @@
 
 import Foundation
 
-public protocol ReducerDependency: Sendable, AnyObject {}
-
-public protocol EmptyReducerDependency: ReducerDependency {}
-
 public protocol Reducer<State, Action> {
     associatedtype State
     associatedtype Action
-    associatedtype Dependency
+    associatedtype Output = Never
     
-    var dependency: Dependency { get }
+    func reduce(_ state: inout State, action: Action) -> ReducerResult<Action, Output>
+}
+
+public struct ReducerResult<Action, Output> {
+    public let effect: Effect<Action>
+    public let output: Output?
     
-    func reduce(_ state: inout State, action: Action) -> Effect<Action>
+    public init(effect: Effect<Action>, output: Output? = nil) {
+        self.effect = effect
+        self.output = output
+    }
 }
