@@ -26,6 +26,8 @@ public protocol StoreCore<State, Action>: Sendable {
 public final class Store<Root: Reducer>: StoreCore, ObservableObject {
     @Published public var state: Root.State
     
+    public var onOutput: (@MainActor (Root.Output) -> Void)?
+    
     private var bufferedActions: [Root.Action] = []
     private var isSending = false
     public var effectCancellables: [UUID : AnyCancellable] = [:]
@@ -63,8 +65,14 @@ public final class Store<Root: Reducer>: StoreCore, ObservableObject {
         while index < self.bufferedActions.endIndex {
             defer { index += 1 }
             let action = self.bufferedActions[index]
-            let effect = reducer.reduce(&currentState, action: action)
+            let result = reducer.reduce(&currentState, action: action)
             let uuid = UUID()
+            
+            if let output = result.output {
+                onOutput?(output)
+            }
+            
+            let effect = result.effect
             
             switch effect.operation {
             case .none:
