@@ -6,35 +6,48 @@
 //
 
 import Foundation
-import Combine
 
-@_spi(Internals)
-public class CancellablesCollection {
-    private var storage: [AnyHashable: Set<AnyCancellable>] = [:]
-    private let lock = NSRecursiveLock()
-    
-    func insert(_ cancellable: AnyCancellable, at id: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        self.storage[id, default: []].insert(cancellable)
-    }
-    
-    func remove(_ cancellable: AnyCancellable, at id: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        self.storage[id]?.remove(cancellable)
-        if storage[id]?.isEmpty == true {
-            self.storage[id] = nil
+final class CancellablesCollection: @unchecked Sendable {
+    private var storage: [String: [UUID: @Sendable () -> Void]] = [:]
+    private let lock = NSLock()
+
+    func run<T: Sendable>(
+        id: String,
+        cancelInFlight: Bool,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let task = Task { try await operation() }
+        let key = UUID()
+
+        register(key, at: id, cancelInFlight: cancelInFlight) { task.cancel() }.forEach { $0() }
+        defer { remove(key, at: id) }
+
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
-    
-    func cancel(id: String) {
+
+    private func register(
+        _ key: UUID,
+        at id: String,
+        cancelInFlight: Bool,
+        cancel: @escaping @Sendable () -> Void
+    ) -> [@Sendable () -> Void] {
         lock.lock()
         defer { lock.unlock() }
-        
-        self.storage[id]?.forEach { $0.cancel() }
-        self.storage[id] = nil
+        let inFlight = cancelInFlight ? storage.removeValue(forKey: id).map { Array($0.values) } ?? [] : []
+        storage[id, default: [:]][key] = cancel
+        return inFlight
+    }
+
+    private func remove(_ key: UUID, at id: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage[id]?[key] = nil
+        if storage[id]?.isEmpty == true {
+            storage[id] = nil
+        }
     }
 }

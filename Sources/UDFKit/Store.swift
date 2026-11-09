@@ -22,15 +22,17 @@ public protocol StoreCore<State, Action>: Sendable {
 }
 
 @dynamicMemberLookup
-@preconcurrency@MainActor
+@preconcurrency @MainActor
 public final class Store<Root: Reducer>: StoreCore, ObservableObject {
-    @Published public var state: Root.State
+    @Published public private(set) var state: Root.State
     
     public var onOutput: (@MainActor (Root.Output) -> Void)?
     
+    public private(set) var effectCancellables: [UUID : AnyCancellable] = [:]
+
     private var bufferedActions: [Root.Action] = []
     private var isSending = false
-    public var effectCancellables: [UUID : AnyCancellable] = [:]
+    private let cancellables = CancellablesCollection()
     
     let reducer: Root
     
@@ -45,74 +47,74 @@ public final class Store<Root: Reducer>: StoreCore, ObservableObject {
         guard !self.isSending else { return nil }
         
         self.isSending = true
-        var currentState = self.state
-        let tasks = LockIsolated<[Task<Void, Never>]>([])
-        
-        defer {
-            withExtendedLifetime(self.bufferedActions) {
-                self.bufferedActions.removeAll()
-            }
-            self.state = currentState
-            self.isSending = false
-            if !self.bufferedActions.isEmpty {
-                if let task = self.send(self.bufferedActions.removeLast()) {
-                    tasks.withValue { $0.append(task) }
-                }
-            }
-        }
-        
+        var tasks: [Task<Void, Never>] = []
+
         var index = self.bufferedActions.startIndex
         while index < self.bufferedActions.endIndex {
-            defer { index += 1 }
             let action = self.bufferedActions[index]
+            index += 1
+
+            var currentState = self.state
             let result = reducer.reduce(&currentState, action: action)
-            let uuid = UUID()
-            
+            self.state = currentState
+
             if let output = result.output {
                 onOutput?(output)
             }
-            
-            let effect = result.effect
-            
-            switch effect.operation {
-            case .none:
-                break
-            case let .run(operation):
-                let task = Task { [weak self] in
-                    do {
-                        try await operation(
-                            Send { action in
-                                Task { @MainActor in self?.send(action) }
-                            }
-                        )
-                    } catch {
-                        print("Effect error: \(error)")
-                    }
-                    await MainActor.run {
-                        self?.effectCancellables[uuid] = nil
-                    }
-                }
-                tasks.withValue { $0.append(task) }
-                self.effectCancellables[uuid] = AnyCancellable { @Sendable in
-                    task.cancel()
-                }
+
+            if let task = start(result.effect) {
+                tasks.append(task)
             }
         }
-        
+
+        self.bufferedActions.removeAll()
+        self.isSending = false
+
         guard !tasks.isEmpty else { return nil }
-        return Task { @MainActor in
+        return Task { [tasks] in
             await withTaskCancellationHandler {
-                var index = tasks.startIndex
-                while index < tasks.endIndex {
-                    defer { index += 1 }
-                    await tasks[index].value
+                for task in tasks {
+                    await task.value
                 }
             } onCancel: {
-                var index = tasks.startIndex
-                defer { index += 1 }
-                tasks[index].cancel()
+                tasks.forEach { $0.cancel() }
             }
         }
+    }
+
+    private func start(_ effect: Effect<Root.Action>) -> Task<Void, Never>? {
+        guard case let .run(operation) = effect.operation else { return nil }
+
+        let uuid = UUID()
+        let context = Effect<Root.Action>.Context(cancellables: cancellables)
+        let task = Task { [weak self] in
+            let children = LockIsolated<[Task<Void, Never>]>([])
+            await withTaskCancellationHandler {
+                do {
+                    try await operation(
+                        Send { action in
+                            guard let child = self?.send(action) else { return }
+                            children.withValue { $0.append(child) }
+                            if Task.isCancelled { child.cancel() }
+                        },
+                        context
+                    )
+                } catch {
+                    print("Effect error: \(error)")
+                }
+
+                var index = 0
+                while let child = children.withValue({ [index] in index < $0.count ? $0[index] : nil }) {
+                    index += 1
+                    await child.value
+                }
+            } onCancel: {
+                children.value.forEach { $0.cancel() }
+            }
+            self?.effectCancellables[uuid] = nil
+        }
+        self.effectCancellables[uuid] = AnyCancellable { task.cancel() }
+        return task
     }
     
     public subscript<T>(dynamicMember keyPath: KeyPath<Root.State, T>) -> T {
